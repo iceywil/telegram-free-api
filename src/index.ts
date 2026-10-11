@@ -34,3 +34,4 @@ export {
   TimeoutError,
 } from './errors.js';
 export { sleep, randomSleep, randomLong } from './utils.js';
+export { decodeSession, encodeSession, type DirectSession } from './direct/session.js';

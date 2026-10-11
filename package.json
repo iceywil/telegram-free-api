@@ -1,7 +1,7 @@
 {
   "name": "free-telegram-api",
-  "version": "1.0.0",
-  "description": "Free Telegram API for Telegram in Typescript — your real account via web.telegram.org, no api_id needed",
+  "version": "1.1.0",
+  "description": "Free Telegram API for Telegram in Typescript \u2014 your real account via web.telegram.org, no api_id needed",
   "main": "./dist/index.cjs",
   "scripts": {
     "build": "tsup",
@@ -32,7 +32,8 @@
   ],
   "type": "module",
   "dependencies": {
-    "playwright": "^1.62.1"
+    "playwright": "^1.62.1",
+    "telegram": "^2.26.22"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",

@@ -9,6 +9,7 @@ coverage/
 # Telegram sessions — these ARE your logged-in account. Never commit.
 .telegram-session*/
 telegram-login.png
+free-telegram-api.*.json
 
 
 # scratch debug scripts

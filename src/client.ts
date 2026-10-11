@@ -1,23 +1,46 @@
-import { chromium, type BrowserContext, type Page } from 'playwright';
+import type { BrowserContext, Page } from 'playwright';
 import {
   FloodWaitError,
   NotLoggedInError,
   PeerNotFoundError,
   RpcError,
+  TelegramWebError,
   TimeoutError,
   toRpcError,
 } from './errors.js';
+import {
+  decodeSession,
+  encodeSession,
+  exportFromPage,
+  loadSessionFile,
+  saveSessionFile,
+  type DirectSession,
+} from './direct/session.js';
+import { DirectTransport, type InvokeResult } from './direct/transport.js';
 import { BRIDGE_SCRIPT } from './internal/bridge.js';
 import { Chat } from './models/chat.js';
 import { Dialog } from './models/dialog.js';
 import { Entities, type Entity } from './models/entities.js';
 import { Message } from './models/message.js';
 import { User } from './models/user.js';
-import { parsePeerLike, type PeerId, type PeerLike } from './peers.js';
+import { parsePeerLike, peerIdOf, type PeerId, type PeerLike } from './peers.js';
 import { Result } from './result.js';
 import { randomLong, sleep } from './utils.js';
 
 export interface ClientOptions {
+  /**
+   * `browser` (default): every call goes through Telegram Web in Playwright.
+   * `direct`: the browser is only used to log in once; its auth key is then
+   * exported and all calls go straight to Telegram over MTProto (GramJS) —
+   * no browser running, much faster. UI helpers (openChat, sendMessageUI,
+   * screenshot) and `callManager`/`on` are browser-only.
+   */
+  mode?: 'browser' | 'direct';
+  /**
+   * Direct mode: a session string from `exportSession()`. Lets you run with no
+   * browser and no session dir at all (e.g. on a server). Implies `mode: 'direct'`.
+   */
+  session?: string;
   /** Hide the browser window. Default `true`. Use `false` for the first login (QR scan) or to watch. */
   headless?: boolean;
   /** Chromium profile dir holding the Telegram session. One dir per account. Default `.telegram-session`. */
@@ -77,7 +100,7 @@ export interface SendMessageOptions {
    * `app` (default): send through Telegram Web's own pipeline — the message
    * appears in the open window exactly as if you'd sent it.
    * `api`: raw `messages.sendMessage` call; the open window won't show it until reload.
-   * `noWebpage` always uses `api`.
+   * `noWebpage` and direct mode always use `api`.
    */
   via?: 'app' | 'api';
 }
@@ -150,6 +173,8 @@ export class TelegramClient {
     ClientOptions;
   context!: BrowserContext;
   page!: Page;
+  /** Set in direct mode once connected. */
+  direct?: DirectTransport;
   /** Your own user id, set after login. */
   myId: PeerId = 0;
 
@@ -179,6 +204,17 @@ export class TelegramClient {
   // ---------------------------------------------------------------------------
 
   async start(): Promise<void> {
+    if (this.options.mode === 'direct' || this.options.session) {
+      const saved = this.options.session ? decodeSession(this.options.session) : loadSessionFile(this.options.sessionDir);
+      if (saved) return this.connectDirect(saved);
+      this.log('direct mode: no exported session yet — using the browser to get one');
+    }
+    await this.startBrowser();
+    if (this.options.mode === 'direct' && (await this.isLoggedIn())) await this.switchToDirect();
+  }
+
+  private async startBrowser(): Promise<void> {
+    const { chromium } = await import('playwright');
     const { headless, sessionDir, slowMo, proxy, url } = this.options;
     const userAgent = this.options.userAgent ?? (headless ? await headfulUserAgent() : undefined);
 
@@ -214,11 +250,54 @@ export class TelegramClient {
   }
 
   async close(): Promise<void> {
+    await this.direct?.disconnect();
     await this.context?.close();
+  }
+
+  private async connectDirect(session: DirectSession): Promise<void> {
+    const t = Date.now();
+    this.direct = await DirectTransport.connect(session, {
+      peersDir: this.options.session ? undefined : this.options.sessionDir,
+      verbose: this.options.verbose,
+    });
+    this.myId = session.userId;
+    this.log(`direct mode: connected to DC${session.dcId} in ${Date.now() - t} ms (no browser)`);
+  }
+
+  /** Export the browser session's auth key, close the browser, and continue directly. */
+  private async switchToDirect(): Promise<void> {
+    const session = await exportFromPage(this.page);
+    const path = saveSessionFile(this.options.sessionDir, session);
+    this.log(`direct mode: session exported to ${path}`);
+    await this.context.close();
+    this.context = undefined as any;
+    this.page = undefined as any;
+    await this.connectDirect(session);
+  }
+
+  /**
+   * The session as a string (base64 JSON). Pass it as `{ session }` to run
+   * anywhere with no browser. **It is your login — keep it secret.**
+   */
+  async exportSession(): Promise<string> {
+    if (this.direct) return encodeSession(this.direct.session);
+    if (!(await this.isLoggedIn())) throw new NotLoggedInError();
+    return encodeSession(await exportFromPage(this.page));
+  }
+
+  /** `direct` once connected over MTProto, otherwise `browser`. */
+  get activeMode(): 'browser' | 'direct' {
+    return this.direct ? 'direct' : 'browser';
+  }
+
+  private requirePage(what: string): Page {
+    if (!this.page) throw new TelegramWebError(`${what} needs the browser — not available in direct mode`);
+    return this.page;
   }
 
   /** Wait until the web app's API bridge is available. */
   async waitReady(timeoutMs = 60_000): Promise<void> {
+    if (this.direct) return;
     await this.page.waitForFunction('!!(window.__tgw && window.__tgw.ready())', null, { timeout: timeoutMs });
   }
 
@@ -227,6 +306,7 @@ export class TelegramClient {
   // ---------------------------------------------------------------------------
 
   async authState(): Promise<{ state: string | null; myId: number }> {
+    if (this.direct) return { state: 'authStateSignedIn', myId: this.myId };
     try {
       return await this.page.evaluate('window.__tgw.authState()');
     } catch {
@@ -246,6 +326,7 @@ export class TelegramClient {
    */
   async login(opts: LoginOptions = {}): Promise<User> {
     const { timeoutMs = 5 * 60_000, password, qrScreenshotPath = 'telegram-login.png' } = opts;
+    if (this.direct) return this.getMe();
 
     if (!(await this.isLoggedIn())) {
       this.log(
@@ -287,6 +368,7 @@ export class TelegramClient {
 
     await this.page.waitForFunction('!!(window.rootScope && window.rootScope.myId)', null, { timeout: 60_000 });
     this.myId = (await this.authState()).myId;
+    if (this.options.mode === 'direct') await this.switchToDirect();
     const me = await this.getMe();
     this.log(`logged in as ${me}`);
     return me;
@@ -315,7 +397,9 @@ export class TelegramClient {
    */
   async invoke<T = any>(method: string, params: Record<string, unknown> = {}, options?: Record<string, unknown>): Promise<T> {
     for (let attempt = 0; ; attempt++) {
-      const r: any = await this.page.evaluate(`window.__tgw.invoke(${J(method)}, ${J(params)}, ${J(options ?? {})})`);
+      const r: InvokeResult = this.direct
+        ? await this.direct.invoke(method, params)
+        : await this.page.evaluate(`window.__tgw.invoke(${J(method)}, ${J(params)}, ${J(options ?? {})})`);
       if (r.ok) return r.value as T;
       const err = this.toError(r.error, method);
       if (err instanceof FloodWaitError && err.seconds <= this.options.floodSleepThreshold && attempt < 3) {
@@ -333,7 +417,7 @@ export class TelegramClient {
    * Not a stable API — prefer `invoke()` when an MTProto method exists.
    */
   async callManager<T = any>(manager: string, method: string, ...args: unknown[]): Promise<T> {
-    const r: any = await this.page.evaluate(`window.__tgw.call(${J(manager)}, ${J(method)}, ${J(args)})`);
+    const r: any = await this.requirePage('callManager()').evaluate(`window.__tgw.call(${J(manager)}, ${J(method)}, ${J(args)})`);
     if (r.ok) return r.value as T;
     throw this.toError(r.error, `${manager}.${method}`);
   }
@@ -359,18 +443,27 @@ export class TelegramClient {
     const cached = this.peerCache.get(key);
     if (cached) return cached;
 
-    let entity: any;
+    let peerId: PeerId;
     try {
-      entity =
-        p.kind === 'username'
-          ? await this.callManager('appUsersManager', 'resolveUsername', p.username)
-          : await this.callManager('appUsersManager', 'resolvePhone', p.phone);
+      if (this.direct) {
+        // Users/chats in the response land in the transport's peer cache.
+        const res =
+          p.kind === 'username'
+            ? await this.invoke('contacts.resolveUsername', { username: p.username })
+            : await this.invoke('contacts.resolvePhone', { phone: p.phone });
+        peerId = peerIdOf(res.peer);
+      } else {
+        const entity =
+          p.kind === 'username'
+            ? await this.callManager('appUsersManager', 'resolveUsername', p.username)
+            : await this.callManager('appUsersManager', 'resolvePhone', p.phone);
+        if (!entity?._) throw new PeerNotFoundError(peer);
+        peerId = entity._ === 'user' ? Number(entity.id) : -Number(entity.id);
+      }
     } catch (e) {
       if (e instanceof RpcError && /NOT_OCCUPIED|INVALID|NOT_FOUND/.test(e.type)) throw new PeerNotFoundError(peer, e.type);
       throw e;
     }
-    if (!entity?._) throw new PeerNotFoundError(peer);
-    const peerId = entity._ === 'user' ? Number(entity.id) : -Number(entity.id);
     this.peerCache.set(key, peerId);
     return peerId;
   }
@@ -379,7 +472,10 @@ export class TelegramClient {
   async getInputPeer(peer: PeerLike): Promise<any> {
     const peerId = await this.resolvePeer(peer);
     try {
-      const input = await this.callManager('appPeersManager', 'getInputPeerById', peerId);
+      const input = this.direct
+        ? this.direct.getInputPeer(peerId, this.myId)
+        : await this.callManager('appPeersManager', 'getInputPeerById', peerId);
+      if (!input) throw new Error();
       if (input._ !== 'inputPeerChat' && input.access_hash === undefined && input._ !== 'inputPeerSelf') throw new Error();
       return input;
     } catch {
@@ -393,7 +489,7 @@ export class TelegramClient {
   /** User or Chat for a peer. */
   async getEntity(peer: PeerLike): Promise<Entity> {
     const peerId = await this.resolvePeer(peer);
-    const raw = await this.callManager('appPeersManager', 'getPeer', peerId);
+    const raw = this.direct ? this.direct.getPeer(peerId) : await this.callManager('appPeersManager', 'getPeer', peerId);
     if (!raw?._ || raw._ === 'userEmpty' || raw._ === 'chatEmpty') throw new PeerNotFoundError(peer);
     return raw._ === 'user' ? new User(raw) : new Chat(raw);
   }
@@ -657,7 +753,7 @@ export class TelegramClient {
     }
 
     // The app pipeline has no "disable link preview" switch, so use the raw call for that.
-    if (opts.via === 'api' || opts.noWebpage) {
+    if (opts.via === 'api' || opts.noWebpage || this.direct) {
       const res = await this.invoke('messages.sendMessage', {
         peer: input,
         message: text,
@@ -736,6 +832,13 @@ export class TelegramClient {
     handler: (message: Message) => void | Promise<void>,
     opts: { includeOutgoing?: boolean } = {},
   ): Promise<() => void> {
+    if (this.direct) {
+      return this.direct.onNewMessage((raw) => {
+        const msg = new Message(raw, { myId: this.myId });
+        if (msg.isOutgoing && !opts.includeOutgoing) return;
+        void Promise.resolve(handler(msg)).catch((e) => this.log(`onMessage handler error: ${e}`));
+      });
+    }
     return this.on('history_multiappend', (raw) => {
       const msg = new Message(raw, { myId: this.myId });
       if (msg.isOutgoing && !opts.includeOutgoing) return;
@@ -751,7 +854,7 @@ export class TelegramClient {
     let set = this.handlers.get(event);
     if (!set) {
       this.handlers.set(event, (set = new Set()));
-      await this.page.evaluate(`window.__tgw.subscribe(${J(event)})`);
+      await this.requirePage('on()').evaluate(`window.__tgw.subscribe(${J(event)})`);
     }
     set.add(handler);
     return () => set!.delete(handler);
@@ -796,7 +899,7 @@ export class TelegramClient {
   /** Open a chat in the window. */
   async openChat(peer: PeerLike): Promise<void> {
     const peerId = await this.resolvePeer(peer);
-    await this.page.evaluate(`window.appImManager.setInnerPeer({ peerId: ${J(peerId)} })`);
+    await this.requirePage('openChat()').evaluate(`window.appImManager.setInnerPeer({ peerId: ${J(peerId)} })`);
     await this.page
       .locator(COMPOSER)
       .first()
@@ -809,6 +912,7 @@ export class TelegramClient {
    * than `sendMessage()`, and depends on Telegram Web's DOM.
    */
   async sendMessageUI(peer: PeerLike, text: string, opts: { keyDelayMs?: number } = {}): Promise<void> {
+    this.requirePage('sendMessageUI()');
     await this.openChat(peer);
     const input = this.page.locator(COMPOSER).first();
     await input.click();
@@ -821,7 +925,7 @@ export class TelegramClient {
   }
 
   async screenshot(path: string): Promise<void> {
-    await this.page.screenshot({ path });
+    await this.requirePage('screenshot()').screenshot({ path });
   }
 
   private log(msg: string): void {
@@ -842,6 +946,7 @@ function findSentMessage(res: any): { id: number; date: number; message?: any } 
 
 /** Headless Chromium advertises "HeadlessChrome"; present as regular Chrome instead. */
 async function headfulUserAgent(): Promise<string> {
+  const { chromium } = await import('playwright');
   const browser = await chromium.launch({ headless: true });
   try {
     const page = await browser.newPage();

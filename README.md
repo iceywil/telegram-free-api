@@ -15,6 +15,9 @@ bot token, and you can watch every action happen in the browser window.
 
 ## Highlights
 
+- **Two modes.** `browser` drives Telegram Web so you can watch it. `direct`
+  uses the browser only to log in once, then talks MTProto straight to
+  Telegram: no browser, faster startup, about 100 MB of memory.
 - Log in once by scanning a QR code in a visible window. The session persists
   in `.telegram-session/`, and every later run, headed or headless, is already
   logged in.
@@ -76,7 +79,7 @@ npm run dialogs
 | `npm run listen`                           | Print incoming messages live                     |
 | `npm run outreach -- targets.json`         | Paced bulk DMs (dry run unless `SEND=1`)         |
 
-Environment variables: `HEADED=1` (show the browser; default is headless), `SLOW_MO=200` (ms per action, to watch),
+Environment variables: `HEADED=1` (show the browser; default is headless), `TG_MODE=direct`, `TG_SESSION`, `SLOW_MO=200` (ms per action, to watch),
 `TG_SESSION_DIR` (one dir per account), `TG_PASSWORD`.
 
 ## Usage
@@ -131,6 +134,39 @@ await tg.sendMessageUI('@alice', 'typed key by key');
 await tg.close();
 ```
 
+### Direct mode (no browser)
+
+After one browser login, the client can export the session's MTProto auth key
+and drop the browser entirely. The same methods work, and calls go straight to
+Telegram through [GramJS](https://github.com/gram-js/gramjs).
+
+```ts
+const tg = await TelegramClient.launch({ mode: 'direct' });
+await tg.login();               // first run: exports the key from the browser profile, then closes it
+await tg.getDialogs();          // plain MTProto from Node from now on
+
+// Run anywhere (a server, CI) with no browser and no session dir:
+const session = await tg.exportSession();          // a string. It IS your login, so keep it secret
+const remote = await TelegramClient.launch({ session });
+```
+
+From the scripts: `TG_MODE=direct npm run dialogs`, or `TG_SESSION=<string> npm run dialogs`.
+
+| | `browser` (default) | `direct` |
+|---|---|---|
+| Runtime | Chromium + Telegram Web | Node only (GramJS) |
+| Startup | about 4 s | about 1 s (0.7 s from a session string) |
+| Sending | Telegram Web's own pipeline (shows in the window) | `messages.sendMessage` |
+| `openChat`, `sendMessageUI`, `screenshot`, `callManager`, `on` | Yes | No (throws) |
+| `onMessage` | Telegram Web events | GramJS update handler |
+
+Direct mode reuses Telegram Web's own app id and reports the same device,
+platform, app version and language pack. Telegram sees it as the same Web
+session. It is still the *same* login, though: terminating that session in
+Telegram's settings ends both. The key is saved to
+`<sessionDir>/free-telegram-api.session.json` with file mode 600, and the
+peer cache (access hashes) to `free-telegram-api.peers.json`.
+
 ### Peers
 
 Anything that takes a `peer` accepts any of these:
@@ -179,6 +215,8 @@ API, so prefer `invoke()`.
 
 ## How it works
 
+Browser mode:
+
 ```
 Node (TelegramClient) ──page.evaluate──▶ window.__tgw (injected bridge)
                                             │
@@ -187,6 +225,9 @@ Node (TelegramClient) ──page.evaluate──▶ window.__tgw (injected bridge
                           ├─ apiManager.invokeApi ──▶ MTProto ──▶ Telegram
                           └─ appMessagesManager / appUsersManager / …
 ```
+
+Direct mode reads the auth key that Telegram Web keeps in `localStorage`
+(`dcN_auth_key`) once, then connects to the same data center with GramJS.
 
 The Chromium profile in `sessionDir` stores Telegram Web's auth key, so it is
 the logged-in account. Never commit it (it's gitignored). Use one
