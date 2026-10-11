@@ -1,0 +1,66 @@
+{
+  "name": "free-telegram-api",
+  "version": "1.0.0",
+  "description": "Free Telegram API for Telegram in Typescript — your real account via web.telegram.org, no api_id needed",
+  "main": "./dist/index.cjs",
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build",
+    "prepare": "npm run build",
+    "login": "tsx examples/login.ts",
+    "dialogs": "tsx examples/dialogs.ts",
+    "history": "tsx examples/history.ts",
+    "send": "tsx examples/send.ts",
+    "listen": "tsx examples/listen.ts",
+    "outreach": "tsx examples/outreach.ts",
+    "recent": "tsx examples/recent.ts",
+    "contacted": "tsx examples/contacted.ts"
+  },
+  "keywords": [
+    "telegram",
+    "telegram-api",
+    "mtproto",
+    "playwright",
+    "telegram-web",
+    "userbot",
+    "no-api-key",
+    "free-telegram-api",
+    "typescript"
+  ],
+  "type": "module",
+  "dependencies": {
+    "playwright": "^1.62.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "tsup": "^8.5.1",
+    "tsx": "^4.23.15",
+    "typescript": "5.9",
+    "vitest": "^5.0.3"
+  },
+  "license": "MIT",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/iceywil/telegram-free-api.git"
+  }
+}

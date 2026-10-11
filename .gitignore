@@ -1,0 +1,17 @@
+node_modules/
+dist/
+*.log
+.env
+.env.*
+!.env.example
+coverage/
+
+# Telegram sessions — these ARE your logged-in account. Never commit.
+.telegram-session*/
+telegram-login.png
+
+
+# scratch debug scripts
+scripts/dbg*
+outreach-log.jsonl
+targets.json
