@@ -123,6 +123,7 @@ const me = await tg.getMe();
 const alice = await tg.getEntity('@alice');      // User | Chat
 const full = await tg.getFullUser('@alice');     // bio, common chats…
 const contacts = await tg.getContacts();
+const members = await tg.getParticipants(-1001234567); // group members + role (creator/admin/member)
 
 // live
 const stop = await tg.onMessage((m) => console.log(m.senderId, m.text));

@@ -16,6 +16,7 @@ export {
   type Conversation,
   type ContactedSinceOptions,
   type ContactedPerson,
+  type Participant,
 } from './client.js';
 export { User } from './models/user.js';
 export { Chat, type ChatType } from './models/chat.js';

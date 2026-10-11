@@ -141,6 +141,13 @@ export interface ContactedPerson {
   about?: string;
 }
 
+export interface Participant {
+  user: User;
+  role: 'creator' | 'admin' | 'member' | 'banned' | 'left';
+  /** Unix seconds, when Telegram provides it. */
+  joinedAt?: number;
+}
+
 export interface SearchOptions {
   /** Search inside one chat; omit for a global search across all chats. */
   peer?: PeerLike;
@@ -645,6 +652,56 @@ export class TelegramClient {
     return out;
   }
 
+  /**
+   * Members of a group or channel (as far as Telegram lets you see them), with
+   * their role. Large channels only expose members to admins.
+   *
+   * ```ts
+   * for (const m of await tg.getParticipants(-1001234567)) console.log(m.user.username, m.role);
+   * ```
+   */
+  async getParticipants(peer: PeerLike, opts: { limit?: number } = {}): Promise<Participant[]> {
+    await this.ensureLoggedIn();
+    const max = opts.limit ?? Infinity;
+    const input = await this.getInputPeer(peer);
+    const out: Participant[] = [];
+
+    if (input._ === 'inputPeerChat') {
+      const res = await this.invoke('messages.getFullChat', { chat_id: input.chat_id });
+      const users = Entities.fromResponse(res);
+      for (const p of res.full_chat?.participants?.participants ?? []) {
+        const user = users.user(Number(p.user_id));
+        if (user) out.push({ user, role: participantRole(p._), joinedAt: p.date });
+        if (out.length >= max) break;
+      }
+      return out;
+    }
+    if (input._ !== 'inputPeerChannel') throw new TypeError('getParticipants needs a group or channel');
+
+    const channel = { _: 'inputChannel', channel_id: input.channel_id, access_hash: input.access_hash };
+    for (let offset = 0; out.length < max; ) {
+      const res = await this.invoke('channels.getParticipants', {
+        channel,
+        filter: { _: 'channelParticipantsRecent' },
+        offset,
+        limit: Math.min(200, max - out.length),
+        hash: '0',
+      });
+      const parts = res.participants ?? [];
+      if (!parts.length) break;
+      const users = Entities.fromResponse(res);
+      for (const p of parts) {
+        const userId = p.user_id ?? (p.peer?._ === 'peerUser' ? p.peer.user_id : undefined);
+        const user = userId !== undefined ? users.user(Number(userId)) : undefined;
+        if (user) out.push({ user, role: participantRole(p._), joinedAt: p.date });
+      }
+      offset += parts.length;
+      if (offset >= (res.count ?? 0)) break;
+      await sleep(300);
+    }
+    return out;
+  }
+
   /** Dialogs with unread messages (scans up to `maxDialogs`). */
   async getUnreadDialogs(maxDialogs = 500): Promise<Dialog[]> {
     const out: Dialog[] = [];
@@ -942,6 +999,14 @@ function findSentMessage(res: any): { id: number; date: number; message?: any } 
   }
   const idUpdate = (res?.updates ?? []).find((u: any) => u._ === 'updateMessageID');
   return idUpdate ? { id: idUpdate.id, date: res.date } : undefined;
+}
+
+function participantRole(type: string): Participant['role'] {
+  if (/Creator/.test(type)) return 'creator';
+  if (/Admin/.test(type)) return 'admin';
+  if (/Banned/.test(type)) return 'banned';
+  if (/Left/.test(type)) return 'left';
+  return 'member';
 }
 
 /** Headless Chromium advertises "HeadlessChrome"; present as regular Chrome instead. */

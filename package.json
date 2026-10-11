@@ -1,6 +1,6 @@
 {
   "name": "free-telegram-api",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Free Telegram API for Telegram in Typescript \u2014 your real account via web.telegram.org, no api_id needed",
   "main": "./dist/index.cjs",
   "scripts": {
