@@ -36,7 +36,8 @@ npm install git+https://github.com/iceywil/telegram-free-api.git#v1.0.0
 npx playwright install chromium   # if you don't have it yet
 ```
 
-Node 20+. The package builds itself on install (`prepare`).
+Node 20+. The package builds itself on install (`prepare`). On npm 12+, git
+dependencies are opt-in: add `--allow-git=all` to the install command.
 
 From source:
 
